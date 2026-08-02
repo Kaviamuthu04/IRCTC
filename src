@@ -1,0 +1,2435 @@
+main.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include "app_config.h"
+#include "authentication.h"
+#include "train.h"
+#include "notification.h"
+#include "reservation.h"
+#include "payment.h"
+#include "report.h"
+#include "stress_test.h"
+#include "memory_manager.h"
+#include "logger.h"
+#include "waitlist.h"
+#include "user.h"
+
+static void flushStdinLine(void)
+{
+    int c;
+
+    while (((c = getchar()) != '\n') && (c != EOF))
+    {
+        /* discard */
+    }
+}
+
+static void touchDataFile(const char *path)
+{
+    FILE *fp;
+
+    fp = fopen(path, "a");
+    if (fp != NULL)
+    {
+        (void)fclose(fp);
+    }
+}
+
+static void initializeFiles(void)
+{
+    (void)srand((unsigned int)time(NULL));
+
+    if (bootstrapDirectories() != 0)
+    {
+        (void)fprintf(stderr, "FATAL: could not create required directories\n");
+        exit(EXIT_FAILURE);
+    }
+
+    touchDataFile(USER_FILE);
+    touchDataFile(TRAIN_FILE);
+    touchDataFile(RESERVATION_FILE);
+    touchDataFile(PAYMENT_FILE);
+    touchDataFile(LOGIN_HISTORY_FILE);
+    touchDataFile(NOTIFICATION_FILE);
+    touchDataFile(WAITLIST_FILE);
+    touchDataFile(QUEUE_FILE);
+
+    (void)printf("System Initialized Successfully!\n");
+}
+
+static void printMenu(void)
+{
+    (void)printf("\n=================================\n");
+    (void)printf("      IRCTC TATKAL SYSTEM\n");
+    (void)printf("=================================\n");
+    (void)printf("1.  Register User\n");
+    (void)printf("2.  Login\n");
+    (void)printf("3.  Add Train\n");
+    (void)printf("4.  View Trains\n");
+    (void)printf("5.  Book Ticket\n");
+    (void)printf("6.  Cancel Ticket\n");
+    (void)printf("7.  View Reservation\n");
+    (void)printf("8.  Payment\n");
+    (void)printf("9.  Generate Report\n");
+    (void)printf("10. Stress Test\n");
+    (void)printf("11. Forgot Password\n");
+    (void)printf("12. Update Train Schedule\n");
+    (void)printf("13. View Waitlist\n");
+    (void)printf("14. Revenue Report\n");
+    (void)printf("15. View Login History\n");
+    (void)printf("16. View Notifications\n");
+    (void)printf("17. Partial Cancellation\n");
+    (void)printf("18. OOM Quick Check\n");
+    (void)printf("19. OOM Dashboard\n");
+    (void)printf("20. Full OOM Analysis\n");
+    (void)printf("21. View Registered Users\n");
+    (void)printf("22. Exit\n");
+    (void)printf("\nEnter Choice: ");
+}
+
+int main(void)
+{
+    int choice = 0;
+    int running = 1;
+
+    initializeFiles();
+
+    while (running != 0)
+    {
+        printMenu();
+        if (scanf("%d", &choice) != 1)
+        {
+            (void)printf("Invalid Input. Please Enter A Number.\n");
+            flushStdinLine();
+            continue;
+        }
+
+        switch (choice)
+        {
+            case 1:  registerUser(); break;
+            case 2:  (void)loginUser(); break;
+            case 3:  addTrain(); break;
+            case 4:  viewTrains(); break;
+            case 5:  bookTicket(); break;
+            case 6:  cancelTicket(); break;
+            case 7:  viewReservation(); break;
+            case 8:  makePayment(); break;
+            case 9:  generateReport(); break;
+            case 10: runStressTest(); break;
+            case 11: forgotPassword(); break;
+            case 12: updateTrainSchedule(); break;
+            case 13: viewWaitlist(); break;
+            case 14: generateRevenueReport(); break;
+            case 15: viewLoginHistory(); break;
+            case 16: viewNotifications(); break;
+            case 17: partialCancellation(); break;
+            case 18:
+            {
+                long freeMemoryKb;
+
+                freeMemoryKb = getAvailableMemoryKb();
+                (void)printf("\n===== OOM QUICK CHECK =====\n");
+                (void)printf("Available Memory : %ld KB\n", freeMemoryKb);
+                if ((freeMemoryKb >= 0) && (freeMemoryKb < MEMORY_WARNING))
+                {
+                    (void)printf("WARNING : MEMORY PRESSURE DETECTED\n");
+                    logOOMEvent();
+                    addUserToQueue("BOOKING_REQUEST");
+                }
+                else
+                {
+                    (void)printf("Memory Status : HEALTHY\n");
+                }
+                break;
+            }
+            case 19: showOOMDashboard(); break;
+            case 20: runOOMAnalysis(); break;
+            case 21: viewUsers(); break;
+            case 22:
+                (void)printf("Exiting Application...\n");
+                running = 0;
+                break;
+            default:
+                (void)printf("Invalid Choice! Please Try Again.\n");
+                break;
+        }
+    }
+
+    return 0;
+}
+
+
+
+app config.c
+
+#include <sys/stat.h>
+#include <errno.h>
+#include <stdio.h>
+#include "app_config.h"
+
+/* mkdirIfMissing: create a directory with 0755 permissions.
+ * Treats "already exists" as success (idempotent bootstrap). */
+static int mkdirIfMissing(const char *path)
+{
+    int result;
+
+    result = mkdir(path, 0755);
+    if ((result != 0) && (errno != EEXIST))
+    {
+        (void)fprintf(stderr,
+                      "ERROR: could not create directory '%s'\n",
+                      path);
+        return -1;
+    }
+    return 0;
+}
+
+int bootstrapDirectories(void)
+{
+    int status = 0;
+
+    if (mkdirIfMissing(DATA_DIR) != 0)
+    {
+        status = -1;
+    }
+    if (mkdirIfMissing(LOG_DIR) != 0)
+    {
+        status = -1;
+    }
+    if (mkdirIfMissing(REPORT_DIR) != 0)
+    {
+        status = -1;
+    }
+    return status;
+}
+
+
+
+
+
+authentication.c
+
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+#include "authentication.h"
+#include "logger.h"
+#include "app_config.h"
+
+/* SECURITY NOTE (documented, not silently ignored):
+ * Passwords are stored in a flat pipe-delimited file as in the
+ * original prototype. This is acceptable only for a local POC/demo.
+ * Before any real deployment, replace this with a vetted password
+ * hashing scheme (e.g. libsodium crypto_pwhash / Argon2id) and never
+ * store or log plaintext credentials. See docs/Memory_Management_and_Optimization.md
+ * "Security Follow-ups" section. */
+
+typedef struct
+{
+    char username[USERNAME_LEN];
+    char email[EMAIL_LEN];
+    char phone[PHONE_LEN];
+    char password[PASSWORD_LEN];
+} StoredUser;
+
+static void flushStdinLine(void)
+{
+    int c;
+
+    while (((c = getchar()) != '\n') && (c != EOF))
+    {
+        /* discard */
+    }
+}
+
+void viewLoginHistory(void)
+{
+    FILE *fp;
+    int ch;
+
+    fp = fopen(LOGIN_HISTORY_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("No Login History Found\n");
+        return;
+    }
+    while ((ch = fgetc(fp)) != EOF)
+    {
+        (void)putchar(ch);
+    }
+    (void)fclose(fp);
+}
+
+void registerUser(void)
+{
+    StoredUser user;
+    FILE *fp;
+
+    memset(&user, 0, sizeof(user));
+
+    (void)printf("\n===== USER REGISTRATION =====\n");
+    (void)printf("Username: ");
+    if (scanf("%49s", user.username) != 1) { flushStdinLine(); return; }
+    (void)printf("Email: ");
+    if (scanf("%99s", user.email) != 1) { flushStdinLine(); return; }
+    (void)printf("Phone: ");
+    if (scanf("%14s", user.phone) != 1) { flushStdinLine(); return; }
+    (void)printf("Password: ");
+    if (scanf("%49s", user.password) != 1) { flushStdinLine(); return; }
+    flushStdinLine();
+
+    fp = fopen(USER_FILE, "a");
+    if (fp == NULL)
+    {
+        (void)printf("Error Opening User File\n");
+        return;
+    }
+    (void)fprintf(fp, "%s|%s|%s|%s\n",
+                  user.username, user.email, user.phone, user.password);
+    (void)fclose(fp);
+    (void)printf("\nRegistration Successful\n");
+}
+
+int loginUser(void)
+{
+    char input[100];
+    char password[PASSWORD_LEN];
+    StoredUser user;
+    FILE *fp;
+    FILE *logfp;
+    int captcha;
+    int userCaptcha;
+
+    captcha = (rand() % 9000) + 1000;
+
+    (void)printf("\n===== LOGIN =====\n");
+    (void)printf("Username / Email / Phone : ");
+    if (scanf("%99s", input) != 1) { flushStdinLine(); return 0; }
+    (void)printf("Password : ");
+    if (scanf("%49s", password) != 1) { flushStdinLine(); return 0; }
+    (void)printf("Captcha : %d\n", captcha);
+    (void)printf("Enter Captcha : ");
+    if (scanf("%d", &userCaptcha) != 1) { flushStdinLine(); return 0; }
+    flushStdinLine();
+
+    if (userCaptcha != captcha)
+    {
+        (void)printf("Invalid Captcha\n");
+        return 0;
+    }
+
+    fp = fopen(USER_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("User File Not Found\n");
+        return 0;
+    }
+
+    while (fscanf(fp, "%49[^|]|%99[^|]|%14[^|]|%49[^\n]\n",
+                  user.username, user.email, user.phone, user.password) == 4)
+    {
+        int idMatches = (strcmp(input, user.username) == 0) ||
+                        (strcmp(input, user.email) == 0) ||
+                        (strcmp(input, user.phone) == 0);
+
+        if ((idMatches != 0) && (strcmp(password, user.password) == 0))
+        {
+            time_t now;
+            struct tm tmResult;
+            char timeBuf[64];
+
+            (void)fclose(fp);
+            (void)printf("\nLogin Successful\n");
+            (void)printf("Welcome %s\n", user.username);
+            logLogin(user.username);
+
+            logfp = fopen(LOGIN_HISTORY_FILE, "a");
+            if (logfp != NULL)
+            {
+                now = time(NULL);
+                (void)localtime_r(&now, &tmResult);
+                (void)strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tmResult);
+
+                (void)fprintf(logfp, "\n=====================\n");
+                (void)fprintf(logfp, "Username   : %s\n", user.username);
+                (void)fprintf(logfp, "Email      : %s\n", user.email);
+                (void)fprintf(logfp, "Phone      : %s\n", user.phone);
+                (void)fprintf(logfp, "Login Time : %s\n", timeBuf);
+                (void)fprintf(logfp, "=====================\n");
+                (void)fclose(logfp);
+            }
+            return 1;
+        }
+    }
+    (void)fclose(fp);
+    (void)printf("\nInvalid Credentials\n");
+    return 0;
+}
+
+void forgotPassword(void)
+{
+    char input[100];
+    char newPassword[PASSWORD_LEN];
+    StoredUser user;
+    FILE *fp;
+    FILE *temp;
+    int found = 0;
+
+    fp = fopen(USER_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("User File Not Found\n");
+        return;
+    }
+    temp = fopen(DATA_DIR "/users.tmp", "w");
+    if (temp == NULL)
+    {
+        (void)fclose(fp);
+        (void)printf("Temp File Error\n");
+        return;
+    }
+
+    (void)printf("\n===== FORGOT PASSWORD =====\n");
+    (void)printf("Enter Username / Email / Phone : ");
+    if (scanf("%99s", input) != 1)
+    {
+        flushStdinLine();
+        (void)fclose(fp);
+        (void)fclose(temp);
+        (void)remove(DATA_DIR "/users.tmp");
+        return;
+    }
+
+    while (fscanf(fp, "%49[^|]|%99[^|]|%14[^|]|%49[^\n]\n",
+                  user.username, user.email, user.phone, user.password) == 4)
+    {
+        if ((strcmp(input, user.username) == 0) ||
+            (strcmp(input, user.email) == 0) ||
+            (strcmp(input, user.phone) == 0))
+        {
+            found = 1;
+            (void)printf("\nAccount Found\n");
+            (void)printf("Enter New Password: ");
+            if (scanf("%49s", newPassword) == 1)
+            {
+                (void)strncpy(user.password, newPassword, sizeof(user.password) - 1U);
+                user.password[sizeof(user.password) - 1U] = '\0';
+            }
+        }
+        (void)fprintf(temp, "%s|%s|%s|%s\n",
+                      user.username, user.email, user.phone, user.password);
+    }
+    (void)fclose(fp);
+    (void)fclose(temp);
+    (void)remove(USER_FILE);
+    (void)rename(DATA_DIR "/users.tmp", USER_FILE);
+
+    if (found != 0)
+    {
+        (void)printf("Password Updated Successfully\n");
+    }
+    else
+    {
+        (void)printf("User Not Found\n");
+    }
+}
+
+
+logger.c
+
+#include <stdio.h>
+#include <time.h>
+#include "logger.h"
+#include "app_config.h"
+
+/* Internal helper: open the shared booking log, append a line, close.
+ * Centralising the fopen/fclose pair here means every caller gets the
+ * same error handling instead of five copy-pasted variants. */
+static void appendToBookingLog(const char *line)
+{
+    FILE *fp;
+
+    fp = fopen(BOOKING_LOG_FILE, "a");
+    if (fp == NULL)
+    {
+        (void)fprintf(stderr,
+                      "WARNING: unable to open %s for logging\n",
+                      BOOKING_LOG_FILE);
+        return;
+    }
+    (void)fprintf(fp, "%s\n", line);
+    (void)fclose(fp);
+}
+
+void logMessage(const char *message)
+{
+    FILE *fp;
+    time_t now;
+    char timeBuf[64];
+    struct tm tmResult;
+
+    if (message == NULL)
+    {
+        return;
+    }
+
+    fp = fopen(BOOKING_LOG_FILE, "a");
+    if (fp == NULL)
+    {
+        return;
+    }
+
+    now = time(NULL);
+    (void)localtime_r(&now, &tmResult);
+    (void)strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tmResult);
+
+    (void)fprintf(fp, "[%s] %s\n", timeBuf, message);
+    (void)fclose(fp);
+}
+
+void logBooking(int pnr)
+{
+    char line[128];
+
+    (void)snprintf(line, sizeof(line), "Booking Created PNR %d", pnr);
+    appendToBookingLog(line);
+}
+
+void logCancellation(int pnr)
+{
+    char line[128];
+
+    (void)snprintf(line, sizeof(line), "PNR %d Cancelled", pnr);
+    appendToBookingLog(line);
+    (void)printf("Booking Log Updated\n");
+}
+
+void logPayment(int pnr)
+{
+    char line[128];
+
+    (void)snprintf(line, sizeof(line), "Payment Success PNR %d", pnr);
+    appendToBookingLog(line);
+}
+
+void logLogin(const char *username)
+{
+    char line[192];
+
+    if (username == NULL)
+    {
+        return;
+    }
+    (void)snprintf(line, sizeof(line), "Login Success %s", username);
+    appendToBookingLog(line);
+}
+
+void logOOMEvent(void)
+{
+    FILE *fp;
+    time_t now;
+    char timeBuf[64];
+    struct tm tmResult;
+
+    fp = fopen(OOM_LOG_FILE, "a");
+    if (fp == NULL)
+    {
+        return;
+    }
+
+    now = time(NULL);
+    (void)localtime_r(&now, &tmResult);
+    (void)strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tmResult);
+
+    (void)fprintf(fp,
+                  "[%s] WARNING : MEMORY PRESSURE DETECTED\n",
+                  timeBuf);
+    (void)fclose(fp);
+}
+
+
+mem manager.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "memory_manager.h"
+#include "logger.h"
+#include "app_config.h"
+
+void *memoryAllocate(size_t size)
+{
+    void *ptr;
+
+    if (size == 0U)
+    {
+        return NULL;
+    }
+
+    ptr = malloc(size);
+    if (ptr == NULL)
+    {
+        (void)fprintf(stderr, "ERROR: memory allocation of %zu bytes failed\n", size);
+    }
+    return ptr;
+}
+
+void memoryRelease(void *ptr)
+{
+    if (ptr != NULL)
+    {
+        free(ptr);
+    }
+}
+
+long getAvailableMemoryKb(void)
+{
+    FILE *fp;
+    char line[256];
+    long memAvailableKb = -1L;
+
+    fp = fopen("/proc/meminfo", "r");
+    if (fp == NULL)
+    {
+        return -1L;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        if (strncmp(line, "MemAvailable:", 13) == 0)
+        {
+            if (sscanf(line, "MemAvailable: %ld", &memAvailableKb) != 1)
+            {
+                memAvailableKb = -1L;
+            }
+            break;
+        }
+    }
+    (void)fclose(fp);
+    return memAvailableKb;
+}
+
+MemoryStatus classifyMemory(long availableKb)
+{
+    MemoryStatus status;
+
+    if (availableKb < 0L)
+    {
+        status = MEM_STATUS_CRITICAL; /* fail safe: unknown = treat as critical */
+    }
+    else if (availableKb < (long)MEMORY_CRITICAL)
+    {
+        status = MEM_STATUS_CRITICAL;
+    }
+    else if (availableKb < (long)MEMORY_WARNING)
+    {
+        status = MEM_STATUS_WARNING;
+    }
+    else
+    {
+        status = MEM_STATUS_HEALTHY;
+    }
+    return status;
+}
+
+static const char *memoryStatusLabel(MemoryStatus status)
+{
+    const char *label;
+
+    switch (status)
+    {
+        case MEM_STATUS_CRITICAL:
+            label = "CRITICAL";
+            break;
+        case MEM_STATUS_WARNING:
+            label = "WARNING";
+            break;
+        case MEM_STATUS_HEALTHY:
+            label = "HEALTHY";
+            break;
+        default:
+            label = "UNKNOWN";
+            break;
+    }
+    return label;
+}
+
+void addUserToQueue(const char *username)
+{
+    FILE *fp;
+
+    if (username == NULL)
+    {
+        return;
+    }
+
+    fp = fopen(QUEUE_FILE, "a");
+    if (fp == NULL)
+    {
+        (void)fprintf(stderr, "ERROR: cannot open %s\n", QUEUE_FILE);
+        return;
+    }
+    (void)fprintf(fp, "%s\n", username);
+    (void)fclose(fp);
+    (void)printf("Server Busy - Added To Waiting Queue\n");
+}
+
+int countQueuedUsers(void)
+{
+    FILE *fp;
+    char line[200];
+    int count = 0;
+
+    fp = fopen(QUEUE_FILE, "r");
+    if (fp == NULL)
+    {
+        return 0;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        count++;
+    }
+    (void)fclose(fp);
+    return count;
+}
+
+int countOOMWarnings(void)
+{
+    FILE *fp;
+    char line[300];
+    int count = 0;
+
+    fp = fopen(OOM_LOG_FILE, "r");
+    if (fp == NULL)
+    {
+        return 0;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        if (strstr(line, "WARNING : MEMORY PRESSURE DETECTED") != NULL)
+        {
+            count++;
+        }
+    }
+    (void)fclose(fp);
+    return count;
+}
+
+void showOOMDashboard(void)
+{
+    long availableKb;
+    int queuedUsers;
+    int oomWarnings;
+    MemoryStatus status;
+
+    availableKb = getAvailableMemoryKb();
+    queuedUsers = countQueuedUsers();
+    oomWarnings = countOOMWarnings();
+    status = classifyMemory(availableKb);
+
+    (void)printf("\n=================================\n");
+    (void)printf("          OOM DASHBOARD\n");
+    (void)printf("=================================\n");
+    (void)printf("Available Memory : %ld KB\n", availableKb);
+    (void)printf("Memory Status    : %s\n", memoryStatusLabel(status));
+    (void)printf("Queued Users     : %d\n", queuedUsers);
+    (void)printf("OOM Warnings     : %d\n", oomWarnings);
+    (void)printf("Load Shedding    : %s\n",
+                 (status == MEM_STATUS_CRITICAL) ? "ACTIVE" : "INACTIVE");
+    (void)printf("=================================\n");
+}
+
+void runOOMAnalysis(void)
+{
+    long availableKb;
+    MemoryStatus status;
+
+    (void)printf("\n=================================\n");
+    (void)printf("        OOM ANALYSIS\n");
+    (void)printf("=================================\n");
+
+    availableKb = getAvailableMemoryKb();
+    status = classifyMemory(availableKb);
+
+    (void)printf("Available Memory : %ld KB\n", availableKb);
+    (void)printf("Memory Status    : %s\n", memoryStatusLabel(status));
+
+    switch (status)
+    {
+        case MEM_STATUS_CRITICAL:
+            logOOMEvent();
+            addUserToQueue("BOOKING_REQUEST");
+            (void)printf("Action Taken     : USER QUEUED\n");
+            (void)printf("Load Shedding    : ACTIVE\n");
+            break;
+        case MEM_STATUS_WARNING:
+            logOOMEvent();
+            (void)printf("Action Taken     : MONITORING\n");
+            (void)printf("Load Shedding    : INACTIVE\n");
+            break;
+        case MEM_STATUS_HEALTHY:
+        default:
+            (void)printf("Action Taken     : NONE\n");
+            (void)printf("Load Shedding    : INACTIVE\n");
+            break;
+    }
+
+    (void)printf("\n=================================\n");
+    (void)printf("      OOM ANALYSIS REPORT\n");
+    (void)printf("=================================\n");
+    (void)printf("Queued Users     : %d\n", countQueuedUsers());
+    (void)printf("OOM Warnings     : %d\n", countOOMWarnings());
+    (void)printf("Status           : ANALYSIS COMPLETED\n");
+    (void)printf("=================================\n");
+}
+
+
+notification.C
+
+
+#include <stdio.h>
+#include "notification.h"
+#include "app_config.h"
+
+void sendNotification(void)
+{
+    (void)printf("\n==================================\n");
+    (void)printf("Booking Confirmed\n");
+    (void)printf("SMS Sent Successfully\n");
+    (void)printf("Email Sent Successfully\n");
+    (void)printf("==================================\n");
+}
+
+void sendPromotionNotification(int pnr)
+{
+    FILE *fp;
+
+    fp = fopen(NOTIFICATION_FILE, "a");
+    if (fp == NULL)
+    {
+        return;
+    }
+    (void)fprintf(fp,
+                  "PNR %d : Waitlist Promoted. Complete Payment To Confirm Seat.\n",
+                  pnr);
+    (void)fclose(fp);
+}
+
+void sendCancellationNotification(int pnr, float refund)
+{
+    FILE *fp;
+
+    fp = fopen(NOTIFICATION_FILE, "a");
+    if (fp == NULL)
+    {
+        return;
+    }
+    (void)fprintf(fp, "PNR:%d Refund:%.2f\n", pnr, (double)refund);
+    (void)fclose(fp);
+    (void)printf("Notification Sent\n");
+}
+
+void viewNotifications(void)
+{
+    FILE *fp;
+    int ch;
+
+    fp = fopen(NOTIFICATION_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("No Notifications Found\n");
+        return;
+    }
+    while ((ch = fgetc(fp)) != EOF)
+    {
+        (void)putchar(ch);
+    }
+    (void)fclose(fp);
+}
+
+
+
+payment.ch
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include "payment.h"
+#include "logger.h"
+#include "notification.h"
+#include "app_config.h"
+
+float calculateFare(int age)
+{
+    return (age <= CHILD_AGE_LIMIT) ? (float)CHILD_FARE : (float)ADULT_FARE;
+}
+
+float calculateRefund(float fare)
+{
+    float refund;
+
+    refund = fare - (float)CANCELLATION_FEE;
+    if (refund < 0.0f)
+    {
+        refund = 0.0f;
+    }
+    return refund;
+}
+
+void updatePaymentStatus(int pnr)
+{
+    FILE *fp;
+    FILE *temp;
+    char line[500];
+    int filePNR;
+
+    fp = fopen(PAYMENT_FILE, "r");
+    if (fp == NULL)
+    {
+        return;
+    }
+    temp = fopen(PAYMENT_TMP_FILE, "w");
+    if (temp == NULL)
+    {
+        (void)fclose(fp);
+        return;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        if (sscanf(line, "%d|", &filePNR) == 1)
+        {
+            if (filePNR == pnr)
+            {
+                char paymentMethod[50];
+                float amount;
+
+                if (sscanf(line, "%d|%f|%49[^|]", &filePNR, &amount, paymentMethod) == 3)
+                {
+                    (void)fprintf(temp, "%d|%.2f|%s|REFUNDED\n", filePNR, (double)amount, paymentMethod);
+                    continue;
+                }
+            }
+        }
+        (void)fputs(line, temp);
+    }
+    (void)fclose(fp);
+    (void)fclose(temp);
+    (void)remove(PAYMENT_FILE);
+    (void)rename(PAYMENT_TMP_FILE, PAYMENT_FILE);
+}
+
+void viewPaymentStatus(void)
+{
+    FILE *fp;
+    char line[500];
+
+    fp = fopen(PAYMENT_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("No Payment Records Found\n");
+        return;
+    }
+    (void)printf("\n===== PAYMENT STATUS =====\n");
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        (void)printf("%s", line);
+    }
+    (void)fclose(fp);
+}
+
+/* Rewrites one reservation record that matches pnr from PAYMENT_PENDING
+ * to CONFIRMED, writing everything else through unchanged. Returns 1 if
+ * the record was found and updated, 0 otherwise. Field layout must stay
+ * in sync with reservation.c's bookTicket()/cancelTicket() writers. */
+static int rewriteReservationsForPayment(int pnr, int *adultCount,
+                                          int *childCount, float *totalAmount)
+{
+    FILE *fp;
+    FILE *temp;
+    char line[500];
+    int found = 0;
+
+    fp = fopen(RESERVATION_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("Reservation File Not Found\n");
+        return 0;
+    }
+    temp = fopen(RESERVATION_TMP_FILE, "w");
+    if (temp == NULL)
+    {
+        (void)fclose(fp);
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        int filePNR;
+        char name[50];
+        int age;
+        char gender[20];
+        char category[20];
+        int trainNo;
+        int platform;
+        char trainName[50];
+        char source[50];
+        char destination[50];
+        char departure[20];
+        char arrival[20];
+        char journeyDate[20];
+        char seatNo[20];
+        char status[30];
+        int fields;
+
+        fields = sscanf(line,
+            "%d|%49[^|]|%d|%19[^|]|%19[^|]|%d|%49[^|]|%49[^|]|%49[^|]|%19[^|]|%19[^|]|%d|%19[^|]|%19[^|]|%29[^\n]",
+            &filePNR, name, &age, gender, category, &trainNo, trainName,
+            source, destination, departure, arrival, &platform,
+            journeyDate, seatNo, status);
+
+        if ((fields != 15) || (filePNR != pnr))
+        {
+            (void)fputs(line, temp);
+            continue;
+        }
+
+        found = 1;
+        if (strcmp(status, "PAYMENT_PENDING") != 0)
+        {
+            (void)printf("\nPayment Not Required\n");
+            (void)printf("Current Status : %s\n", status);
+            (void)fputs(line, temp);
+            continue;
+        }
+
+        if (age <= CHILD_AGE_LIMIT)
+        {
+            (*childCount)++;
+            *totalAmount += (float)CHILD_FARE;
+        }
+        else
+        {
+            (*adultCount)++;
+            *totalAmount += (float)ADULT_FARE;
+        }
+
+        (void)fprintf(temp, "%d|%s|%d|%s|%s|%d|%s|%s|%s|%s|%s|%d|%s|%s|CONFIRMED\n",
+                      filePNR, name, age, gender, category, trainNo, trainName,
+                      source, destination, departure, arrival, platform,
+                      journeyDate, seatNo);
+
+        (void)printf("\n=================================\n");
+        (void)printf("PAYMENT SUCCESSFUL\n");
+        (void)printf("PNR Number : %d\n", filePNR);
+        (void)printf("Amount     : %.2f\n", (age <= CHILD_AGE_LIMIT) ? CHILD_FARE : ADULT_FARE);
+        (void)printf("Seat No    : %s\n", seatNo);
+        (void)printf("Status     : CONFIRMED\n");
+        (void)printf("=================================\n");
+
+        (void)printf("\n=================================\n");
+        (void)printf("           E-TICKET\n");
+        (void)printf("=================================\n");
+        (void)printf("PNR Number      : %d\n", filePNR);
+        (void)printf("Train Number    : %d\n", trainNo);
+        (void)printf("Train Name      : %s\n", trainName);
+        (void)printf("Passenger Name  : %s\n", name);
+        (void)printf("Age             : %d\n", age);
+        (void)printf("Gender          : %s\n", gender);
+        (void)printf("Category        : %s\n", category);
+        (void)printf("Source          : %s\n", source);
+        (void)printf("Destination     : %s\n", destination);
+        (void)printf("Departure Time  : %s\n", departure);
+        (void)printf("Arrival Time    : %s\n", arrival);
+        (void)printf("Platform Number : %d\n", platform);
+        (void)printf("Journey Date    : %s\n", journeyDate);
+        (void)printf("Seat Number     : %s\n", seatNo);
+        (void)printf("Ticket Status   : CONFIRMED\n");
+        (void)printf("=================================\n");
+
+        {
+            FILE *notify;
+
+            notify = fopen(NOTIFICATION_FILE, "a");
+            if (notify != NULL)
+            {
+                (void)fprintf(notify, "\n=================================\n");
+                (void)fprintf(notify, "PNR Number      : %d\n", filePNR);
+                (void)fprintf(notify, "Train Number    : %d\n", trainNo);
+                (void)fprintf(notify, "Train Name      : %s\n", trainName);
+                (void)fprintf(notify, "Passenger Name  : %s\n", name);
+                (void)fprintf(notify, "Source          : %s\n", source);
+                (void)fprintf(notify, "Destination     : %s\n", destination);
+                (void)fprintf(notify, "Journey Date    : %s\n", journeyDate);
+                (void)fprintf(notify, "Seat Number     : %s\n", seatNo);
+                (void)fprintf(notify, "Status          : CONFIRMED\n");
+                (void)fprintf(notify, "=================================\n");
+                (void)fclose(notify);
+            }
+        }
+    }
+
+    (void)fclose(fp);
+    (void)fclose(temp);
+    (void)remove(RESERVATION_FILE);
+    (void)rename(RESERVATION_TMP_FILE, RESERVATION_FILE);
+    return found;
+}
+
+void makePayment(void)
+{
+    int pnr;
+    int option;
+    int adultCount = 0;
+    int childCount = 0;
+    float totalAmount = 0.0f;
+    int found;
+    FILE *payfp;
+
+    (void)printf("\n===== PAYMENT MODULE =====\n");
+    (void)printf("Enter PNR Number : ");
+    if (scanf("%d", &pnr) != 1)
+    {
+        (void)printf("Invalid Input\n");
+        return;
+    }
+
+    (void)printf("\nPayment Methods\n");
+    (void)printf("1. UPI\n2. GPay\n3. PhonePe\n4. Paytm\n");
+    (void)printf("Select Option : ");
+    if (scanf("%d", &option) != 1)
+    {
+        (void)printf("Invalid Input\n");
+        return;
+    }
+
+    found = rewriteReservationsForPayment(pnr, &adultCount, &childCount, &totalAmount);
+    if (found == 0)
+    {
+        (void)printf("\nPNR Not Found\n");
+        return;
+    }
+
+    payfp = fopen(PAYMENT_FILE, "a");
+    if (payfp != NULL)
+    {
+        static const char *const methodNames[5] = { "", "UPI", "GPay", "PhonePe", "Paytm" };
+
+        (void)fprintf(payfp, "PNR:%d\n", pnr);
+        (void)fprintf(payfp, "Passengers:%d\n", adultCount + childCount);
+        (void)fprintf(payfp, "Adult Count:%d\n", adultCount);
+        (void)fprintf(payfp, "Child Count:%d\n", childCount);
+        (void)fprintf(payfp, "Amount:%.2f\n", (double)totalAmount);
+        if ((option >= 1) && (option <= 4))
+        {
+            (void)fprintf(payfp, "Mode:%s\n", methodNames[option]);
+        }
+        (void)fprintf(payfp, "Status:SUCCESS\n");
+        (void)fprintf(payfp, "----------------------\n");
+        (void)fclose(payfp);
+    }
+
+    (void)printf("\n=================================\n");
+    (void)printf("PAYMENT SUCCESSFUL\n");
+    (void)printf("PNR : %d\n", pnr);
+    (void)printf("Reservation Status Updated\n");
+    (void)printf("Current Status : CONFIRMED\n");
+    (void)printf("=================================\n");
+    logPayment(pnr);
+}
+
+
+
+report.C
+
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include "report.h"
+#include "app_config.h"
+
+void generateReport(void)
+{
+    FILE *fp;
+
+    fp = fopen(DAILY_REPORT_FILE, "w");
+    if (fp == NULL)
+    {
+        (void)printf("Report File Error\n");
+        return;
+    }
+    (void)fprintf(fp, "IRCTC Daily Booking Report\n");
+    (void)fprintf(fp, "Report Generated Successfully\n");
+    (void)fclose(fp);
+    (void)printf("Report Created\n");
+}
+
+void generateRevenueReport(void)
+{
+    FILE *fp;
+    FILE *reportFp;
+    char line[200];
+    float amount;
+    float totalRevenue = 0.0f;
+    time_t t;
+    struct tm tmResult;
+    char timeBuf[64];
+
+    fp = fopen(PAYMENT_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("Payment File Not Found\n");
+        return;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        if (strncmp(line, "Amount:", 7) == 0)
+        {
+            if (sscanf(line, "Amount:%f", &amount) == 1)
+            {
+                totalRevenue += amount;
+            }
+        }
+    }
+    (void)fclose(fp);
+
+    (void)printf("\n==============================\n");
+    (void)printf("       REVENUE REPORT\n");
+    (void)printf("==============================\n");
+    (void)printf("Total Revenue : %.2f\n", (double)totalRevenue);
+    (void)printf("==============================\n");
+
+    reportFp = fopen(REVENUE_REPORT_FILE, "a");
+    if (reportFp == NULL)
+    {
+        (void)printf("Report File Error\n");
+        return;
+    }
+
+    t = time(NULL);
+    (void)localtime_r(&t, &tmResult);
+    (void)strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tmResult);
+
+    (void)fprintf(reportFp, "\n========================================\n");
+    (void)fprintf(reportFp, "      IRCTC REVENUE REPORT\n");
+    (void)fprintf(reportFp, "========================================\n");
+    (void)fprintf(reportFp, "Generated On : %s\n", timeBuf);
+    (void)fprintf(reportFp, "Total Revenue : %.2f\n", (double)totalRevenue);
+    (void)fprintf(reportFp, "========================================\n");
+    (void)fclose(reportFp);
+
+    (void)printf("Revenue Report Saved Successfully\n");
+}
+
+
+
+Reservation
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include "reservation.h"
+#include "payment.h"
+#include "waitlist.h"
+#include "notification.h"
+#include "logger.h"
+#include "train.h"
+#include "app_config.h"
+
+#define MAX_PASSENGER_NAME 50
+#define MAX_GENDER_LEN     20
+#define MAX_CATEGORY_LEN   20
+#define MAX_SEAT_LEN       20
+
+typedef struct
+{
+    char name[MAX_PASSENGER_NAME];
+    int  age;
+    char gender[MAX_GENDER_LEN];
+    char category[MAX_CATEGORY_LEN];
+    char seatNo[MAX_SEAT_LEN];
+} Passenger;
+
+static void flushStdinLine(void)
+{
+    int c;
+
+    while (((c = getchar()) != '\n') && (c != EOF))
+    {
+        /* discard */
+    }
+}
+
+int isJourneyExpired(const char *travelDate)
+{
+    int day = 0;
+    int month = 0;
+    int year = 0;
+    time_t t;
+    struct tm current;
+    int currentDay;
+    int currentMonth;
+    int currentYear;
+
+    if (travelDate == NULL)
+    {
+        return 1; /* fail safe: unknown date treated as expired */
+    }
+
+    (void)sscanf(travelDate, "%d-%d-%d", &day, &month, &year);
+
+    t = time(NULL);
+    (void)localtime_r(&t, &current);
+    currentDay = current.tm_mday;
+    currentMonth = current.tm_mon + 1;
+    currentYear = current.tm_year + 1900;
+
+    if (year < currentYear)
+    {
+        return 1;
+    }
+    if ((year == currentYear) && (month < currentMonth))
+    {
+        return 1;
+    }
+    if ((year == currentYear) && (month == currentMonth) && (day < currentDay))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+int generatePNR(void)
+{
+    FILE *fp;
+    int lastPNR = 100000;
+
+    fp = fopen(PNR_FILE, "r");
+    if (fp != NULL)
+    {
+        if (fscanf(fp, "%d", &lastPNR) != 1)
+        {
+            lastPNR = 100000;
+        }
+        (void)fclose(fp);
+    }
+    lastPNR++;
+
+    fp = fopen(PNR_FILE, "w");
+    if (fp != NULL)
+    {
+        (void)fprintf(fp, "%d", lastPNR);
+        (void)fclose(fp);
+    }
+    return lastPNR;
+}
+
+int seatExists(const char *seatNo)
+{
+    FILE *fp;
+    char line[500];
+    char existingSeat[MAX_SEAT_LEN];
+
+    if (seatNo == NULL)
+    {
+        return 0;
+    }
+
+    fp = fopen(RESERVATION_FILE, "r");
+    if (fp == NULL)
+    {
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        if (sscanf(line,
+            "%*d|%*[^|]|%*d|%*[^|]|%*[^|]|%*d|%*[^|]|%*[^|]|%*[^|]|%*[^|]|%*[^|]|%*d|%*[^|]|%19[^|]",
+            existingSeat) == 1)
+        {
+            if (strcmp(existingSeat, seatNo) == 0)
+            {
+                (void)fclose(fp);
+                return 1;
+            }
+        }
+    }
+    (void)fclose(fp);
+    return 0;
+}
+
+void bookTicket(void)
+{
+    int pnr;
+    int passengerCount = 0;
+    int bookedSeats = 0;
+    int confirmedCount = 0;
+    int waitlistCount = 0;
+    float totalFare = 0.0f;
+    char source[50];
+    char destination[50];
+    char journeyDate[20];
+    Train train;
+    FILE *fp;
+    Passenger *passengers;
+    int i;
+
+    fp = fopen(RESERVATION_FILE, "a");
+    if (fp == NULL)
+    {
+        (void)printf("Reservation File Error\n");
+        return;
+    }
+
+    (void)printf("\n===== BOOK TICKET =====\n");
+    (void)printf("Source : ");
+    if (scanf(" %49[^\n]", source) != 1) { (void)fclose(fp); return; }
+    (void)printf("Destination : ");
+    if (scanf(" %49[^\n]", destination) != 1) { (void)fclose(fp); return; }
+    (void)printf("Journey Date (DD-MM-YYYY) : ");
+    if (scanf("%19s", journeyDate) != 1) { (void)fclose(fp); return; }
+
+    if (findTrainByRoute(source, destination, &train) == 0)
+    {
+        (void)printf("No Train Available\n");
+        (void)fclose(fp);
+        return;
+    }
+
+    (void)printf("\nTrain No      : %d\n", train.trainNo);
+    (void)printf("Train Name    : %s\n", train.trainName);
+    (void)printf("AvailableSeat : %d\n", train.availableSeats);
+    (void)printf("\nNumber Of Passengers : ");
+    if (scanf("%d", &passengerCount) != 1)
+    {
+        (void)fclose(fp);
+        return;
+    }
+    if (passengerCount <= 0)
+    {
+        (void)printf("Invalid Passenger Count\n");
+        (void)fclose(fp);
+        return;
+    }
+
+    if ((train.availableSeats > 0) && (passengerCount > train.availableSeats))
+    {
+        (void)printf("\n=================================\n");
+        (void)printf("BOOKING FAILED\n");
+        (void)printf("Requested Seats : %d\n", passengerCount);
+        (void)printf("Available Seats : %d\n", train.availableSeats);
+        (void)printf("Only %d Seats Available\n", train.availableSeats);
+        (void)printf("=================================\n");
+        (void)fclose(fp);
+        return;
+    }
+
+    passengers = (Passenger *)malloc(sizeof(Passenger) * (size_t)passengerCount);
+    if (passengers == NULL)
+    {
+        (void)printf("Memory Allocation Failed\n");
+        (void)fclose(fp);
+        return;
+    }
+
+    pnr = generatePNR();
+    (void)printf("\nGenerated PNR : %d\n", pnr);
+
+    for (i = 0; i < passengerCount; i++)
+    {
+        (void)printf("\n====================\n");
+        (void)printf("Passenger %d\n", i + 1);
+        (void)printf("====================\n");
+        (void)printf("Name : ");
+        if (scanf(" %49[^\n]", passengers[i].name) != 1)
+        {
+            passengers[i].name[0] = '\0';
+        }
+        (void)printf("Age : ");
+        if (scanf("%d", &passengers[i].age) != 1)
+        {
+            passengers[i].age = 0;
+        }
+        (void)printf("Gender : ");
+        if (scanf("%19s", passengers[i].gender) != 1)
+        {
+            passengers[i].gender[0] = '\0';
+        }
+
+        if (passengers[i].age <= 10)
+        {
+            (void)strncpy(passengers[i].category, "Child", sizeof(passengers[i].category) - 1U);
+        }
+        else
+        {
+            (void)strncpy(passengers[i].category, "Adult", sizeof(passengers[i].category) - 1U);
+        }
+        passengers[i].category[sizeof(passengers[i].category) - 1U] = '\0';
+
+        if (train.availableSeats == 0)
+        {
+            FILE *wf;
+
+            wf = fopen(WAITLIST_FILE, "a");
+            if (wf == NULL)
+            {
+                (void)printf("Waitlist File Error\n");
+                continue;
+            }
+            (void)fprintf(wf, "%d|%s|%d|%s|%s|%d|%s|%s|%s|%s|%s|%d|%s|WAITLIST\n",
+                          pnr, passengers[i].name, passengers[i].age,
+                          passengers[i].gender, passengers[i].category,
+                          train.trainNo, train.trainName, source, destination,
+                          train.departure, train.arrival, train.platform,
+                          journeyDate);
+            (void)fclose(wf);
+            waitlistCount++;
+            (void)printf("%s Added To WAITLIST\n", passengers[i].name);
+            continue;
+        }
+
+        allocateSeat(passengers[i].seatNo);
+        totalFare += calculateFare(passengers[i].age);
+
+        (void)fprintf(fp, "%d|%s|%d|%s|%s|%d|%s|%s|%s|%s|%s|%d|%s|%s|PAYMENT_PENDING\n",
+                      pnr, passengers[i].name, passengers[i].age,
+                      passengers[i].gender, passengers[i].category,
+                      train.trainNo, train.trainName, source, destination,
+                      train.departure, train.arrival, train.platform,
+                      journeyDate, passengers[i].seatNo);
+        (void)fflush(fp); /* make this record visible to seatExists() before
+                              the next passenger in this same booking is
+                              allocated a seat, otherwise two passengers in
+                              one transaction can collide on the same seat */
+
+        train.availableSeats--;
+        bookedSeats++;
+        confirmedCount++;
+    }
+
+    (void)fclose(fp);
+
+    if (bookedSeats > 0)
+    {
+        decreaseSeats(train.trainNo, bookedSeats);
+    }
+
+    (void)printf("\n=================================\n");
+    (void)printf("BOOKING SUMMARY\n");
+    (void)printf("=================================\n");
+    (void)printf("PNR Number : %d\n", pnr);
+    (void)printf("Confirmed Passengers : %d\n", confirmedCount);
+    (void)printf("Waitlist Passengers : %d\n", waitlistCount);
+    (void)printf("Total Fare : %.2f\n", (double)totalFare);
+    (void)printf("=================================\n");
+
+    logBooking(pnr);
+    free(passengers);
+}
+
+void viewReservation(void)
+{
+    FILE *fp;
+    int ch;
+
+    fp = fopen(RESERVATION_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("No Reservations Found\n");
+        return;
+    }
+    (void)printf("\n===== RESERVATIONS =====\n");
+    while ((ch = fgetc(fp)) != EOF)
+    {
+        (void)putchar(ch);
+    }
+    (void)fclose(fp);
+}
+
+void partialCancellation(void)
+{
+    int pnr;
+    int passengerNo;
+    int cancelledTrainNo = 0;
+    FILE *fp;
+    FILE *temp;
+    char line[500];
+    int count = 0;
+
+    (void)printf("Enter PNR : ");
+    if (scanf("%d", &pnr) != 1) { flushStdinLine(); return; }
+    (void)printf("Passenger Number To Cancel : ");
+    if (scanf("%d", &passengerNo) != 1) { flushStdinLine(); return; }
+
+    fp = fopen(RESERVATION_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("Reservation File Error\n");
+        return;
+    }
+    temp = fopen(RESERVATION_TMP_FILE, "w");
+    if (temp == NULL)
+    {
+        (void)fclose(fp);
+        return;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        int filePNR;
+
+        (void)sscanf(line, "%d|", &filePNR);
+        if (filePNR == pnr)
+        {
+            count++;
+            if (count == passengerNo)
+            {
+                (void)sscanf(line, "%*d|%*[^|]|%*d|%*[^|]|%*[^|]|%d|", &cancelledTrainNo);
+                (void)printf("Cancelled Train = %d\n", cancelledTrainNo);
+                (void)printf("Passenger Cancelled Successfully\n");
+                continue;
+            }
+        }
+        (void)fputs(line, temp);
+    }
+    (void)fclose(fp);
+    (void)fclose(temp);
+    (void)remove(RESERVATION_FILE);
+    (void)rename(RESERVATION_TMP_FILE, RESERVATION_FILE);
+
+    if (cancelledTrainNo != 0)
+    {
+        releaseSeat(cancelledTrainNo);
+        promoteWaitlistPassenger(cancelledTrainNo);
+        (void)printf("Seat Released\n");
+    }
+}
+
+void cancelTicket(void)
+{
+    int pnr;
+    int found = 0;
+    char line[500];
+    char choice = 'N';
+    FILE *fp;
+    FILE *temp;
+    float fare = (float)ADULT_FARE;
+
+    (void)printf("\n===== CANCEL TICKET =====\n");
+    (void)printf("Enter PNR Number: ");
+    if (scanf("%d", &pnr) != 1) { flushStdinLine(); return; }
+
+    fp = fopen(RESERVATION_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("Reservation File Not Found\n");
+        return;
+    }
+    temp = fopen(RESERVATION_TMP_FILE, "w");
+    if (temp == NULL)
+    {
+        (void)printf("Temp File Error\n");
+        (void)fclose(fp);
+        return;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        int filePNR = 0;
+        int trainNo = 0;
+        char journeyDate[20] = "";
+
+        (void)sscanf(line,
+            "%d|%*[^|]|%*d|%*[^|]|%*[^|]|%d|%*[^|]|%*[^|]|%*[^|]|%*[^|]|%*[^|]|%*d|%19[^|]",
+            &filePNR, &trainNo, journeyDate);
+
+        if (filePNR != pnr)
+        {
+            (void)fputs(line, temp);
+            continue;
+        }
+
+        found = 1;
+
+        if (isJourneyExpired(journeyDate) != 0)
+        {
+            (void)printf("\n=================================\n");
+            (void)printf("CANCELLATION NOT ALLOWED\n");
+            (void)printf("Journey Date : %s\n", journeyDate);
+            (void)printf("Journey Already Completed\n");
+            (void)printf("Please Contact Administrator\n");
+            (void)printf("=================================\n");
+            (void)fputs(line, temp);
+            continue;
+        }
+
+        (void)printf("\nTicket Found\n%s\n", line);
+        (void)printf("\nAre You Sure You Want To Cancel ? (Y/N) : ");
+        if (scanf(" %c", &choice) != 1)
+        {
+            choice = 'N';
+        }
+
+        if ((choice == 'Y') || (choice == 'y'))
+        {
+            float refund;
+
+            refund = calculateRefund(fare);
+            releaseSeat(trainNo);
+            promoteWaitlistPassenger(trainNo);
+            updatePaymentStatus(pnr);
+            sendCancellationNotification(pnr, refund);
+            logCancellation(pnr);
+            (void)printf("\nRefund Amount : %.2f\n", (double)refund);
+            (void)printf("Ticket Cancelled Successfully\n");
+            /* record dropped: cancelled ticket is not written back */
+        }
+        else
+        {
+            (void)printf("Cancellation Aborted\n");
+            (void)fputs(line, temp);
+        }
+    }
+
+    (void)fclose(fp);
+    (void)fclose(temp);
+    (void)remove(RESERVATION_FILE);
+    (void)rename(RESERVATION_TMP_FILE, RESERVATION_FILE);
+
+    if (found == 0)
+    {
+        (void)printf("PNR Not Found\n");
+    }
+}
+stress test C
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <pthread.h>
+#include "memory_manager.h"
+#include "logger.h"
+#include "app_config.h"
+#include "stress_test.h"
+
+#define USER_MEMORY_KB       50
+#define MAX_STRESS_USERS  20000  /* sane upper bound to stop fat-finger DoS on the host */
+
+static int successfulBookings;
+static int waitlistBookings;
+static long totalAllocatedMemoryKb;
+static long totalFreedMemoryKb;
+static pthread_mutex_t counterLock;
+
+static void sleepMillis(long milliseconds)
+{
+    struct timespec ts;
+
+    ts.tv_sec = milliseconds / 1000;
+    ts.tv_nsec = (milliseconds % 1000) * 1000000L;
+    (void)nanosleep(&ts, NULL);
+}
+
+static void *stressUser(void *arg)
+{
+    int id;
+    char *buffer;
+    int bookingResult;
+
+    id = *(int *)arg;
+    (void)printf("User %d Booking Started\n", id);
+
+    buffer = (char *)memoryAllocate((size_t)USER_MEMORY_KB * 1024U);
+    if (buffer != NULL)
+    {
+        memset(buffer, 0, (size_t)USER_MEMORY_KB * 1024U);
+        (void)pthread_mutex_lock(&counterLock);
+        totalAllocatedMemoryKb += USER_MEMORY_KB;
+        (void)pthread_mutex_unlock(&counterLock);
+    }
+
+    sleepMillis(20);
+
+    bookingResult = rand() % 100;
+    (void)pthread_mutex_lock(&counterLock);
+    if (bookingResult < 80)
+    {
+        successfulBookings++;
+    }
+    else
+    {
+        waitlistBookings++;
+    }
+    (void)pthread_mutex_unlock(&counterLock);
+
+    if (buffer != NULL)
+    {
+        memoryRelease(buffer);
+        (void)pthread_mutex_lock(&counterLock);
+        totalFreedMemoryKb += USER_MEMORY_KB;
+        (void)pthread_mutex_unlock(&counterLock);
+    }
+
+    (void)printf("User %d Booking Completed\n", id);
+    return NULL;
+}
+
+static void writeStressLog(int users, double executionTime,
+                            long memBeforeKb, long memAfterKb, long memoryLeakKb)
+{
+    FILE *fp;
+
+    fp = fopen(STRESS_LOG_FILE, "a");
+    if (fp == NULL)
+    {
+        return;
+    }
+    (void)fprintf(fp, "\n=================================\n");
+    (void)fprintf(fp, "STRESS TEST REPORT\n");
+    (void)fprintf(fp, "=================================\n");
+    (void)fprintf(fp, "Total Users : %d\n", users);
+    (void)fprintf(fp, "Successful Booking : %d\n", successfulBookings);
+    (void)fprintf(fp, "Waitlist Requests : %d\n", waitlistBookings);
+    (void)fprintf(fp, "Execution Time : %.3f Seconds\n", executionTime);
+    (void)fprintf(fp, "Memory Before : %ld KB\n", memBeforeKb);
+    (void)fprintf(fp, "Memory After : %ld KB\n", memAfterKb);
+    (void)fprintf(fp, "Memory Per User : %d KB\n", USER_MEMORY_KB);
+    (void)fprintf(fp, "Total Memory Allocated : %ld KB\n", totalAllocatedMemoryKb);
+    (void)fprintf(fp, "Total Memory Freed : %ld KB\n", totalFreedMemoryKb);
+    (void)fprintf(fp, "Memory Leak (accounting) : %ld KB\n", memoryLeakKb);
+    (void)fclose(fp);
+}
+
+void runStressTest(void)
+{
+    int users = 0;
+    pthread_t *threads;
+    int *ids;
+    long memoryBeforeKb;
+    long memoryAfterKb;
+    long memoryLeakKb;
+    struct timespec startTs;
+    struct timespec endTs;
+    double executionTime;
+    int i;
+    int mutexReady = 0;
+
+    successfulBookings = 0;
+    waitlistBookings = 0;
+    totalAllocatedMemoryKb = 0;
+    totalFreedMemoryKb = 0;
+
+    (void)printf("\n===== STRESS TEST =====\n");
+    (void)printf("Enter Number Of Users : ");
+    if (scanf("%d", &users) != 1)
+    {
+        (void)printf("Invalid Input\n");
+        return;
+    }
+    if ((users <= 0) || (users > MAX_STRESS_USERS))
+    {
+        (void)printf("Invalid User Count (must be 1-%d)\n", MAX_STRESS_USERS);
+        return;
+    }
+
+    srand((unsigned int)time(NULL));
+
+    if (pthread_mutex_init(&counterLock, NULL) != 0)
+    {
+        (void)printf("Failed To Initialise Mutex\n");
+        return;
+    }
+    mutexReady = 1;
+
+    threads = (pthread_t *)memoryAllocate(sizeof(pthread_t) * (size_t)users);
+    ids = (int *)memoryAllocate(sizeof(int) * (size_t)users);
+    if ((threads == NULL) || (ids == NULL))
+    {
+        (void)printf("Memory Allocation Failed\n");
+        memoryRelease(threads);
+        memoryRelease(ids);
+        if (mutexReady != 0)
+        {
+            (void)pthread_mutex_destroy(&counterLock);
+        }
+        return;
+    }
+
+    memoryBeforeKb = getAvailableMemoryKb();
+    (void)clock_gettime(CLOCK_MONOTONIC, &startTs);
+
+    for (i = 0; i < users; i++)
+    {
+        ids[i] = i + 1;
+        if (pthread_create(&threads[i], NULL, stressUser, &ids[i]) != 0)
+        {
+            (void)fprintf(stderr, "WARNING: failed to spawn thread for user %d\n", ids[i]);
+            ids[i] = -1; /* mark: no join needed */
+        }
+    }
+    for (i = 0; i < users; i++)
+    {
+        if (ids[i] != -1)
+        {
+            (void)pthread_join(threads[i], NULL);
+        }
+    }
+
+    (void)clock_gettime(CLOCK_MONOTONIC, &endTs);
+    executionTime = (double)(endTs.tv_sec - startTs.tv_sec) +
+                    ((double)(endTs.tv_nsec - startTs.tv_nsec) / 1e9);
+
+    memoryAfterKb = getAvailableMemoryKb();
+    memoryLeakKb = totalAllocatedMemoryKb - totalFreedMemoryKb;
+
+    if ((memoryAfterKb >= 0) && (memoryAfterKb < MEMORY_WARNING))
+    {
+        logOOMEvent();
+    }
+
+    writeStressLog(users, executionTime, memoryBeforeKb, memoryAfterKb, memoryLeakKb);
+
+    (void)printf("\n=================================\n");
+    (void)printf("STRESS TEST REPORT\n");
+    (void)printf("=================================\n\n");
+    (void)printf("Total Users                 : %d\n", users);
+    (void)printf("Successful Booking          : %d\n", successfulBookings);
+    (void)printf("Waitlist Requests           : %d\n", waitlistBookings);
+    (void)printf("Execution Time              : %.3f Seconds\n", executionTime);
+    (void)printf("Memory Before                : %ld KB\n", memoryBeforeKb);
+    (void)printf("Memory Per User             : %d KB\n", USER_MEMORY_KB);
+    (void)printf("Total Memory Allocated      : %ld KB\n", totalAllocatedMemoryKb);
+    (void)printf("Total Memory Freed          : %ld KB\n", totalFreedMemoryKb);
+    (void)printf("Memory After                : %ld KB\n", memoryAfterKb);
+    (void)printf("Memory Leak (accounting)    : %ld KB\n", memoryLeakKb);
+    (void)printf("Leak Status                 : %s\n",
+                 (memoryLeakKb == 0) ? "NO MEMORY LEAK" : "MEMORY LEAK DETECTED");
+    (void)printf("Status                      : %s\n",
+                 (memoryLeakKb == 0) ? "PASSED" : "FAILED");
+    (void)printf("=================================\n");
+
+    (void)pthread_mutex_destroy(&counterLock);
+    memoryRelease(threads);
+    memoryRelease(ids);
+}
+
+
+
+train.c 
+
+#include <stdio.h>
+#include <string.h>
+#include "train.h"
+#include "app_config.h"
+
+static void readLine(char *buffer, size_t size)
+{
+    if (fgets(buffer, (int)size, stdin) != NULL)
+    {
+        buffer[strcspn(buffer, "\n")] = '\0';
+    }
+    else
+    {
+        buffer[0] = '\0';
+    }
+}
+
+static void flushStdinLine(void)
+{
+    int c;
+
+    while (((c = getchar()) != '\n') && (c != EOF))
+    {
+        /* discard */
+    }
+}
+
+void addTrain(void)
+{
+    Train t;
+    FILE *fp;
+
+    memset(&t, 0, sizeof(t));
+
+    (void)printf("\n===== ADD TRAIN =====\n");
+    (void)printf("Train Number: ");
+    if (scanf("%d", &t.trainNo) != 1)
+    {
+        (void)printf("Invalid Input\n");
+        flushStdinLine();
+        return;
+    }
+    flushStdinLine();
+
+    (void)printf("Train Name: ");
+    readLine(t.trainName, sizeof(t.trainName));
+    (void)printf("Source: ");
+    readLine(t.source, sizeof(t.source));
+    (void)printf("Destination: ");
+    readLine(t.destination, sizeof(t.destination));
+    (void)printf("Departure Time: ");
+    readLine(t.departure, sizeof(t.departure));
+    (void)printf("Arrival Time: ");
+    readLine(t.arrival, sizeof(t.arrival));
+
+    (void)printf("Platform Number: ");
+    if (scanf("%d", &t.platform) != 1)
+    {
+        (void)printf("Invalid Input\n");
+        flushStdinLine();
+        return;
+    }
+    (void)printf("Total Seats: ");
+    if (scanf("%d", &t.totalSeats) != 1)
+    {
+        (void)printf("Invalid Input\n");
+        flushStdinLine();
+        return;
+    }
+    flushStdinLine();
+    t.availableSeats = t.totalSeats;
+
+    fp = fopen(TRAIN_FILE, "a");
+    if (fp == NULL)
+    {
+        (void)printf("File Error\n");
+        return;
+    }
+    (void)fprintf(fp, "%d|%s|%s|%s|%s|%s|%d|%d|%d\n",
+                  t.trainNo, t.trainName, t.source, t.destination,
+                  t.departure, t.arrival, t.platform,
+                  t.totalSeats, t.availableSeats);
+    (void)fclose(fp);
+    (void)printf("\nTrain Added Successfully\n");
+}
+
+int findTrainByRoute(const char *source, const char *destination, Train *out)
+{
+    FILE *fp;
+    int found = 0;
+
+    if ((source == NULL) || (destination == NULL) || (out == NULL))
+    {
+        return 0;
+    }
+
+    fp = fopen(TRAIN_FILE, "r");
+    if (fp == NULL)
+    {
+        return 0;
+    }
+
+    while (fscanf(fp, "%d|%49[^|]|%49[^|]|%49[^|]|%19[^|]|%19[^|]|%d|%d|%d\n",
+                  &out->trainNo, out->trainName, out->source, out->destination,
+                  out->departure, out->arrival, &out->platform,
+                  &out->totalSeats, &out->availableSeats) == 9)
+    {
+        if ((strcmp(source, out->source) == 0) &&
+            (strcmp(destination, out->destination) == 0))
+        {
+            found = 1;
+            break;
+        }
+    }
+    (void)fclose(fp);
+    return found;
+}
+
+void releaseSeat(int trainNo)
+{
+    FILE *fp;
+    FILE *temp;
+    Train t;
+
+    fp = fopen(TRAIN_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("Train File Not Found\n");
+        return;
+    }
+    temp = fopen(TRAIN_TMP_FILE, "w");
+    if (temp == NULL)
+    {
+        (void)fclose(fp);
+        (void)printf("Temp File Error\n");
+        return;
+    }
+
+    while (fscanf(fp, "%d|%49[^|]|%49[^|]|%49[^|]|%19[^|]|%19[^|]|%d|%d|%d\n",
+                  &t.trainNo, t.trainName, t.source, t.destination,
+                  t.departure, t.arrival, &t.platform,
+                  &t.totalSeats, &t.availableSeats) == 9)
+    {
+        if (t.trainNo == trainNo)
+        {
+            t.availableSeats++;
+            (void)printf("\nSeat Released For Train %d\n", trainNo);
+            (void)printf("Updated Available Seats : %d\n", t.availableSeats);
+        }
+        (void)fprintf(temp, "%d|%s|%s|%s|%s|%s|%d|%d|%d\n",
+                      t.trainNo, t.trainName, t.source, t.destination,
+                      t.departure, t.arrival, t.platform,
+                      t.totalSeats, t.availableSeats);
+    }
+    (void)fclose(fp);
+    (void)fclose(temp);
+    (void)remove(TRAIN_FILE);
+    (void)rename(TRAIN_TMP_FILE, TRAIN_FILE);
+}
+
+void viewTrains(void)
+{
+    FILE *fp;
+    Train t;
+    char source[STATION_LEN];
+    char destination[STATION_LEN];
+    int found = 0;
+
+    fp = fopen(TRAIN_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("Train File Not Found\n");
+        return;
+    }
+
+    (void)printf("Source: ");
+    if (scanf(" %49[^\n]", source) != 1)
+    {
+        (void)fclose(fp);
+        return;
+    }
+    (void)printf("Destination: ");
+    if (scanf(" %49[^\n]", destination) != 1)
+    {
+        (void)fclose(fp);
+        return;
+    }
+
+    while (fscanf(fp, "%d|%49[^|]|%49[^|]|%49[^|]|%19[^|]|%19[^|]|%d|%d|%d\n",
+                  &t.trainNo, t.trainName, t.source, t.destination,
+                  t.departure, t.arrival, &t.platform,
+                  &t.totalSeats, &t.availableSeats) == 9)
+    {
+        if ((strcmp(source, t.source) == 0) &&
+            (strcmp(destination, t.destination) == 0))
+        {
+            found = 1;
+            (void)printf("\n========================\n");
+            (void)printf("Train Number     : %d\n", t.trainNo);
+            (void)printf("Train Name       : %s\n", t.trainName);
+            (void)printf("Source           : %s\n", t.source);
+            (void)printf("Destination      : %s\n", t.destination);
+            (void)printf("Departure Time   : %s\n", t.departure);
+            (void)printf("Arrival Time     : %s\n", t.arrival);
+            (void)printf("Platform Number  : %d\n", t.platform);
+            (void)printf("Total Seats      : %d\n", t.totalSeats);
+            (void)printf("Available Seats  : %d\n", t.availableSeats);
+            (void)printf("========================\n");
+        }
+    }
+    if (found == 0)
+    {
+        (void)printf("\nNo Trains Available For This Route\n");
+    }
+    (void)fclose(fp);
+}
+
+void decreaseSeats(int trainNo, int seatsBooked)
+{
+    FILE *fp;
+    FILE *temp;
+    Train t;
+
+    fp = fopen(TRAIN_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("Train File Not Found\n");
+        return;
+    }
+    temp = fopen(TRAIN_TMP_FILE, "w");
+    if (temp == NULL)
+    {
+        (void)fclose(fp);
+        return;
+    }
+
+    while (fscanf(fp, "%d|%49[^|]|%49[^|]|%49[^|]|%19[^|]|%19[^|]|%d|%d|%d\n",
+                  &t.trainNo, t.trainName, t.source, t.destination,
+                  t.departure, t.arrival, &t.platform,
+                  &t.totalSeats, &t.availableSeats) == 9)
+    {
+        if (t.trainNo == trainNo)
+        {
+            t.availableSeats -= seatsBooked;
+            if (t.availableSeats < 0)
+            {
+                t.availableSeats = 0;
+            }
+        }
+        (void)fprintf(temp, "%d|%s|%s|%s|%s|%s|%d|%d|%d\n",
+                      t.trainNo, t.trainName, t.source, t.destination,
+                      t.departure, t.arrival, t.platform,
+                      t.totalSeats, t.availableSeats);
+    }
+    (void)fclose(fp);
+    (void)fclose(temp);
+    (void)remove(TRAIN_FILE);
+    (void)rename(TRAIN_TMP_FILE, TRAIN_FILE);
+}
+
+void updateTrainSchedule(void)
+{
+    FILE *fp;
+    FILE *temp;
+    Train t;
+    int targetTrainNo;
+    int newPlatform;
+    char newDeparture[TIME_LEN];
+    char newArrival[TIME_LEN];
+    int found = 0;
+
+    fp = fopen(TRAIN_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("Train File Not Found\n");
+        return;
+    }
+    temp = fopen(TRAIN_TMP_FILE, "w");
+    if (temp == NULL)
+    {
+        (void)fclose(fp);
+        (void)printf("Temp File Error\n");
+        return;
+    }
+
+    (void)printf("\n===== UPDATE TRAIN SCHEDULE =====\n");
+    (void)printf("Enter Train Number: ");
+    if (scanf("%d", &targetTrainNo) != 1)
+    {
+        (void)fclose(fp);
+        (void)fclose(temp);
+        (void)remove(TRAIN_TMP_FILE);
+        return;
+    }
+    (void)printf("New Departure Time: ");
+    if (scanf("%19s", newDeparture) != 1)
+    {
+        (void)fclose(fp);
+        (void)fclose(temp);
+        (void)remove(TRAIN_TMP_FILE);
+        return;
+    }
+    (void)printf("New Arrival Time: ");
+    if (scanf("%19s", newArrival) != 1)
+    {
+        (void)fclose(fp);
+        (void)fclose(temp);
+        (void)remove(TRAIN_TMP_FILE);
+        return;
+    }
+    (void)printf("New Platform Number: ");
+    if (scanf("%d", &newPlatform) != 1)
+    {
+        (void)fclose(fp);
+        (void)fclose(temp);
+        (void)remove(TRAIN_TMP_FILE);
+        return;
+    }
+
+    while (fscanf(fp, "%d|%49[^|]|%49[^|]|%49[^|]|%19[^|]|%19[^|]|%d|%d|%d\n",
+                  &t.trainNo, t.trainName, t.source, t.destination,
+                  t.departure, t.arrival, &t.platform,
+                  &t.totalSeats, &t.availableSeats) == 9)
+    {
+        if (t.trainNo == targetTrainNo)
+        {
+            (void)strncpy(t.departure, newDeparture, sizeof(t.departure) - 1U);
+            t.departure[sizeof(t.departure) - 1U] = '\0';
+            (void)strncpy(t.arrival, newArrival, sizeof(t.arrival) - 1U);
+            t.arrival[sizeof(t.arrival) - 1U] = '\0';
+            t.platform = newPlatform;
+            found = 1;
+        }
+        (void)fprintf(temp, "%d|%s|%s|%s|%s|%s|%d|%d|%d\n",
+                      t.trainNo, t.trainName, t.source, t.destination,
+                      t.departure, t.arrival, t.platform,
+                      t.totalSeats, t.availableSeats);
+    }
+    (void)fclose(fp);
+    (void)fclose(temp);
+    (void)remove(TRAIN_FILE);
+    (void)rename(TRAIN_TMP_FILE, TRAIN_FILE);
+
+    if (found != 0)
+    {
+        (void)printf("Schedule Updated Successfully\n");
+    }
+    else
+    {
+        (void)printf("Train Not Found\n");
+    }
+}
+
+
+user.char
+
+#include <stdio.h>
+#include "user.h"
+#include "app_config.h"
+
+void viewUsers(void)
+{
+    FILE *fp;
+    int ch;
+
+    fp = fopen(USER_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("No Users Found\n");
+        return;
+    }
+    (void)printf("\n===== USERS =====\n");
+    while ((ch = fgetc(fp)) != EOF)
+    {
+        (void)putchar(ch);
+    }
+    (void)fclose(fp);
+}
+
+
+
+waitlist.ch
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include "waitlist.h"
+#include "reservation.h"
+#include "notification.h"
+#include "payment.h"
+#include "app_config.h"
+
+void allocateSeat(char seatNo[20])
+{
+    int coach;
+    int seat;
+
+    do
+    {
+        coach = (rand() % 10) + 1;
+        seat = (rand() % 72) + 1;
+        (void)snprintf(seatNo, 20, "S%d-%d", coach, seat);
+    } while (seatExists(seatNo) != 0);
+}
+
+void promoteWaitlistPassenger(int cancelledTrainNo)
+{
+    FILE *wf;
+    FILE *temp;
+    char firstRecord[500] = "";
+    char line[500];
+    int found = 0;
+
+    wf = fopen(WAITLIST_FILE, "r");
+    if (wf == NULL)
+    {
+        (void)printf("Waitlist Empty\n");
+        return;
+    }
+    temp = fopen(WAITLIST_TMP_FILE, "w");
+    if (temp == NULL)
+    {
+        (void)fclose(wf);
+        (void)printf("Temp File Error\n");
+        return;
+    }
+
+    while (fgets(line, sizeof(line), wf) != NULL)
+    {
+        int waitlistTrainNo;
+
+        (void)sscanf(line, "%*d|%*[^|]|%*d|%*[^|]|%*[^|]|%d|", &waitlistTrainNo);
+
+        if ((found == 0) && (waitlistTrainNo == cancelledTrainNo))
+        {
+            (void)strncpy(firstRecord, line, sizeof(firstRecord) - 1U);
+            firstRecord[sizeof(firstRecord) - 1U] = '\0';
+            found = 1;
+            continue;
+        }
+        (void)fputs(line, temp);
+    }
+    (void)fclose(wf);
+    (void)fclose(temp);
+
+    if (found == 0)
+    {
+        (void)remove(WAITLIST_TMP_FILE);
+        (void)printf("No Matching Waitlist Passenger Found\n");
+        return;
+    }
+
+    (void)remove(WAITLIST_FILE);
+    (void)rename(WAITLIST_TMP_FILE, WAITLIST_FILE);
+
+    {
+        FILE *rf;
+        char seatNo[20];
+        int pnr = 0;
+        float fare = (float)ADULT_FARE;
+        char *pos;
+
+        allocateSeat(seatNo);
+        firstRecord[strcspn(firstRecord, "\n")] = '\0';
+        (void)sscanf(firstRecord, "%d|", &pnr);
+
+        pos = strstr(firstRecord, "WAITLIST");
+        if (pos != NULL)
+        {
+            *pos = '\0';
+        }
+
+        rf = fopen(RESERVATION_FILE, "a");
+        if (rf != NULL)
+        {
+            (void)fprintf(rf, "%s%s|PAYMENT_PENDING\n", firstRecord, seatNo);
+            (void)fclose(rf);
+        }
+
+        sendPromotionNotification(pnr);
+        (void)printf("\n=================================\n");
+        (void)printf("WAITLIST PASSENGER PROMOTED\n");
+        (void)printf("=================================\n");
+        (void)printf("PNR Number  : %d\n", pnr);
+        (void)printf("Seat Number : %s\n", seatNo);
+        (void)printf("Fare Amount : %.2f\n", (double)fare);
+        (void)printf("Status      : PAYMENT_PENDING\n");
+        (void)printf("Please Complete Payment\n");
+        (void)printf("=================================\n");
+    }
+}
+
+void viewWaitlist(void)
+{
+    FILE *fp;
+    char line[500];
+
+    fp = fopen(WAITLIST_FILE, "r");
+    if (fp == NULL)
+    {
+        (void)printf("No Waitlist Data Found\n");
+        return;
+    }
+    (void)printf("\n===== WAITLIST =====\n");
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        (void)printf("%s", line);
+    }
+    (void)fclose(fp);
+}
+
